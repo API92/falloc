@@ -1,11 +1,13 @@
 project(falloc)
 cmake_minimum_required(VERSION 2.8)
 
-find_package(Boost COMPONENTS system REQUIRED)
-include_directories(${Boost_INCLUDE_DIRS})
-link_directories(${Boost_LIBRARY_DIRS})
-
 include_directories(.)
+
+if (NOT Boost_system_FOUND)
+    find_package(Boost COMPONENTS system REQUIRED)
+    include_directories(${Boost_INCLUDE_DIRS})
+    link_directories(${Boost_LIBRARY_DIRS})
+endif()
 
 add_definitions(-DFALLOC_EXPORTS)
 
