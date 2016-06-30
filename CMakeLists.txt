@@ -1,6 +1,8 @@
 project(falloc)
 cmake_minimum_required(VERSION 2.8)
 
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+
 include_directories(.)
 
 if (NOT Boost_system_FOUND)
