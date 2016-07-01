@@ -42,6 +42,9 @@ public:
     bool maintain_local() noexcept;
     bool clear_local() noexcept;
 
+    // Tries to allocate. Else calls std::get_new_handler() and tries again.
+    void * alloc_with_new_handler() noexcept;
+
 private:
     detail::cache_global *global;
     std::unique_ptr<detail::cache_local> local;
@@ -53,6 +56,11 @@ template<typename Object, typename Tag = void>
 class object_cache {
 public:
     static Object * alloc() { return reinterpret_cast<Object *>(impl.alloc()); }
+
+    static Object * alloc_with_new_handler() noexcept
+    {
+        return reinterpret_cast<Object *>(impl.alloc_with_new_handler());
+    }
 
     static void free(Object *p) { impl.free(p); }
 

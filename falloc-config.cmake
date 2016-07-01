@@ -6,14 +6,20 @@
 # ::
 #
 #   falloc_FOUND - Set to true when falloc is found.
-#   falloc_INCLUDE_DIRS - the directories of the falloc headers
-#   falloc_LIBRARIES - the falloc libraries needed for linking
-#   falloc_LIBRARY_DIRS  - the link directories for falloc libraries
+#   falloc_INCLUDE_DIR - the directories of the falloc headers
+#   falloc_LIBRARY - the falloc libraries needed for linking
 
-set(falloc_FOUND TRUE)
-set(falloc_INCLUDE_DIRS ${falloc_DIR})
-set(falloc_LIBRARIES falloc)
-get_filename_component(
-    falloc_LIBRARY_DIRS
-    ${falloc_DIR}/bin/${CMAKE_BUILD_TYPE}
-    ABSOLUTE)
+find_path(falloc_INCLUDE_DIR
+    NAME falloc/cache.hpp
+    PATHS ${CMAKE_CURRENT_LIST_DIR})
+
+find_library(falloc_LIBRARY
+    NAMES falloc libfalloc
+    PATHS ${CMAKE_CURRENT_LIST_DIR}
+    PATH_SUFFIXES bin/${CMAKE_BUILD_TYPE})
+
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(falloc
+    "Could NOT find falloc, try to set the path to the falloc root folder in the variable falloc_DIR"
+    falloc_LIBRARY
+    falloc_INCLUDE_DIR)

@@ -10,6 +10,7 @@
 #include <cassert> // assert
 #include <cstddef> // ptrdiff_t, offsetof
 #include <cstdint> // intptr_t
+#include <cstdlib> // abort
 #include <memory> // align
 #include <new> // new_handler, set_new_handler, get_new_handler
 
@@ -21,38 +22,32 @@ namespace detail {
 
 template<typename T>
 struct list_node {
-    list_node(ptrdiff_t this_offset)
-        : next(nullptr),
-          prev(nullptr),
-          this_offset(this_offset)
+    list_node() : next(this), prev(this)
     {
     }
 
-    T * get() const
+    T * get()
     {
-        return reinterpret_cast<T *>((intptr_t)this - this_offset);
+        return static_cast<T *>(this);
     }
 
     void append(list_node *other)
     {
         other->next = next;
-        if (next)
-            next->prev = other;
+        next->prev = other;
         next = other;
         other->prev = this;
     }
 
     void remove()
     {
-        if (next)
-            next->prev = prev;
-        if (prev)
-            prev->next = next;
+        next->prev = prev;
+        prev->next = next;
+        next = prev = this;
     }
 
     list_node *next;
     list_node *prev;
-    ptrdiff_t this_offset;
 };
 
 ///
@@ -165,7 +160,7 @@ void delete_slab(slab_header *slab)
     // At this moment slab can't be used from other threads.
     if (!munmap(slab, PAGESIZE))
         return;
-    abort();
+    std::abort();
 }
 
 
@@ -173,10 +168,9 @@ void delete_slab(slab_header *slab)
 /// cache_global
 ///
 
-struct cache_global {
+struct cache_global : list_node<cache_global> {
     std::atomic<void *> trash = {nullptr};
     std::atomic_flag clean_lock = ATOMIC_FLAG_INIT;
-    list_node<cache_global> maintain_list;
 
     cache_global();
     ~cache_global();
@@ -185,23 +179,21 @@ struct cache_global {
 
 namespace {
 
-list_node<cache_global> global_maintain_list(
-        offsetof(cache_global, maintain_list));
+list_node<cache_global> global_maintain_list;
 boost::detail::spinlock global_maintain_list_lock = BOOST_DETAIL_SPINLOCK_INIT;
 
 } // namespace
 
 cache_global::cache_global()
-    : maintain_list(offsetof(cache_global, maintain_list))
 {
     boost::detail::spinlock::scoped_lock lock(global_maintain_list_lock);
-    global_maintain_list.append(&maintain_list);
+    global_maintain_list.append(this);
 }
 
 cache_global::~cache_global()
 {
     global_maintain_list_lock.lock();
-    maintain_list.remove();
+    remove(); // remove from global_maintain_list
     global_maintain_list_lock.unlock();
 
     maintain();
@@ -244,7 +236,7 @@ void free_cache_global(cache_global *p)
 /// cache_local
 ///
 
-struct cache_local {
+struct cache_local : list_node<cache_local> {
     // one object, that holds one slab in partial list, to not waste time on
     // moving slab between free and partial lists.
     void *one_hold_partial = nullptr;
@@ -266,8 +258,6 @@ struct cache_local {
 
     // list for objects, freed from foreign threads
     std::atomic<void *> trash = {nullptr};
-
-    list_node<cache_local> maintain_list;
 
     cache_local(unsigned stat_interval, size_t align, size_t object_size);
     ~cache_local();
@@ -291,23 +281,21 @@ struct cache_local {
 
 namespace {
 
-thread_local list_node<cache_local> local_maintain_list(
-        offsetof(cache_local, maintain_list));
+thread_local list_node<cache_local> local_maintain_list;
 
 } // namespace
 
 cache_local::cache_local(unsigned stat_interval, size_t align,
         size_t object_size)
     : timer(stat_interval), stat_interval(stat_interval), align(align),
-    object_size(object_size),
-    maintain_list(offsetof(cache_local, maintain_list))
+    object_size(object_size)
 {
-    local_maintain_list.append(&maintain_list);
+    local_maintain_list.append(this);
 }
 
 cache_local::~cache_local()
 {
-    maintain_list.remove();
+    remove(); // remove from local_maintain_list
 }
 
 inline void cache_local::push(slab_header **list, slab_header *slab)
@@ -388,15 +376,15 @@ inline void * cache_local::alloc()
         std::new_handler h = std::get_new_handler();
         if (h)
             do {
-            try {
-                h();
+                try {
+                    h();
+                }
+                catch (...) {
+                    return nullptr;
+                }
+                result = alloc_impl();
             }
-            catch (...) {
-                return nullptr;
-            }
-            result = alloc_impl();
-        }
-        while (!result);
+            while (!result);
     }
     return result;
 }
@@ -449,12 +437,6 @@ bool cache_local::maintain(size_t limit)
 ///
 /// cache
 ///
-
-namespace {
-
-thread_local cache *cache_maintain_list = nullptr;
-
-} // namespace
 
 cache::cache(cache_global *global, unsigned stat_interval, size_t align,
         size_t object_size)
@@ -558,21 +540,37 @@ bool cache::clear_local() noexcept
     return local->maintain(0);
 }
 
+void * cache::alloc_with_new_handler() noexcept
+{
+    if (void *result = alloc())
+        return result;
+    while (std::new_handler handler = std::get_new_handler())
+        try {
+            handler();
+            if (void *result = alloc())
+                return result;
+        }
+        catch (...) {
+            return nullptr;
+        }
+    return nullptr;
+}
+
 } // namespace detail
 
 bool maintain_all_caches() noexcept
 {
     bool result = false;
-    for (detail::list_node<detail::cache_local> *l =
-            detail::local_maintain_list.next; l; l = l->next) {
+    for (detail::list_node<detail::cache_local> *e =
+            &detail::local_maintain_list, *l = e->next; l != e; l = l->next) {
         detail::cache_local *c = l->get();
         result |= c->maintain(c->slabs_limit);
     }
 
     if (!detail::global_maintain_list_lock.try_lock())
         return result;
-    for (detail::list_node<detail::cache_global> *l =
-            detail::global_maintain_list.next; l; l = l->next)
+    for (detail::list_node<detail::cache_global> *e =
+            &detail::global_maintain_list, *l = e->next; l != e; l = l->next)
         result |= l->get()->maintain();
     detail::global_maintain_list_lock.unlock();
     return result;
@@ -581,16 +579,16 @@ bool maintain_all_caches() noexcept
 bool clear_all_caches() noexcept
 {
     bool result = false;
-    for (detail::list_node<detail::cache_local> *l =
-            detail::local_maintain_list.next; l; l = l->next) {
+    for (detail::list_node<detail::cache_local> *e =
+            &detail::local_maintain_list, *l = e->next; l != e; l = l->next) {
         detail::cache_local *c = l->get();
         result |= c->maintain(0);
     }
 
     if (!detail::global_maintain_list_lock.try_lock())
         return result;
-    for (detail::list_node<detail::cache_global> *l =
-            detail::global_maintain_list.next; l; l = l->next)
+    for (detail::list_node<detail::cache_global> *e =
+            &detail::global_maintain_list, *l = e->next; l != e; l = l->next)
         result |= l->get()->maintain();
     detail::global_maintain_list_lock.unlock();
     return result;

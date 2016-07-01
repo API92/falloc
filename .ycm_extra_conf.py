@@ -38,13 +38,7 @@ flags = [
 '-Wall',
 '-Wextra',
 '-Werror',
-'-Wno-long-long',
-'-Wno-variadic-macros',
 '-fexceptions',
-'-DNDEBUG',
-# You 100% do NOT need -DUSE_CLANG_COMPLETER in your flags; only the YCM
-# source code needs it.
-'-DUSE_CLANG_COMPLETER',
 # THIS IS IMPORTANT! Without a "-std=<something>" flag, clang won't know which
 # language to use when compiling headers. So it will guess. Badly. So C++
 # headers will be compiled as C headers. You don't want that so ALWAYS specify
@@ -62,6 +56,8 @@ flags = [
 '/usr/include',
 '-isystem',
 '/usr/local/include',
+'-isystem',
+'/usr/include/c++/6.1.1',
 '-I',
 '.'
 ]
@@ -121,7 +117,7 @@ def MakeRelativePathsInFlagsAbsolute( flags, working_directory ):
 
 def IsHeaderFile( filename ):
   extension = os.path.splitext( filename )[ 1 ]
-  return extension in [ '.h', '.hxx', '.hpp', '.hh' ]
+  return extension in [ '.h', '.hxx', '.hpp', '.hh', '' ]
 
 
 def GetCompilationInfoForFile( filename ):

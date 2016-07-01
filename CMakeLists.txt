@@ -3,13 +3,17 @@ cmake_minimum_required(VERSION 2.8)
 
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
-include_directories(.)
-
-if (NOT Boost_system_FOUND)
-    find_package(Boost COMPONENTS system REQUIRED)
-    include_directories(${Boost_INCLUDE_DIRS})
-    link_directories(${Boost_LIBRARY_DIRS})
+if(MSVC)
+  if(CMAKE_CXX_FLAGS MATCHES "/W[0-4]")
+    string(REGEX REPLACE "/W[0-4]" "/W4" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+  else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4")
+  endif()
+elseif(CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUCXX)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pedantic")
 endif()
+
+include_directories(.)
 
 add_definitions(-DFALLOC_EXPORTS)
 
@@ -19,7 +23,12 @@ add_library(${PROJECT_NAME}
     src/cache.cpp
 )
 
+if (NOT Boost_system_FOUND)
+    find_package(Boost COMPONENTS system REQUIRED)
+endif()
+include_directories(${Boost_INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} ${Boost_LIBRARIES})
+
 target_link_libraries(${PROJECT_NAME} ${CMAKE_THREAD_LIBS_INIT})
 
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_EXTENSIONS OFF)
