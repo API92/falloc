@@ -4,7 +4,6 @@
 
 #include <falloc/cache.hpp>
 
-#include <algorithm> // max
 #include <atomic> // atomic
 #include <bitset>
 #include <cassert> // assert
@@ -22,9 +21,7 @@ namespace detail {
 
 template<typename T>
 struct list_node {
-    list_node() : next(this), prev(this)
-    {
-    }
+    list_node() : next(this), prev(this) {}
 
     T * get()
     {
@@ -103,7 +100,7 @@ void slab_header::init(unsigned align, unsigned size)
 
     // Check that slab has space for at least two objects.
     // This property used when moving slab from full to partial (not to free).
-    assert(size <= PAGESIZE / 5);
+    assert(free && *reinterpret_cast<void **>(free));
 }
 
 inline void * slab_header::alloc()
@@ -148,7 +145,7 @@ int create_slabs(size_t align, size_t object_size, void *owner,
         slab_header *slab = reinterpret_cast<slab_header *>(p + offs);
         new (slab) slab_header;
         slab->init(align, object_size);
-        slab->owner.store(owner, std::memory_order_release);
+        slab->owner.store(owner, std::memory_order_relaxed);
         slab->next = *list;
         *list = slab;
     }
@@ -201,12 +198,14 @@ cache_global::~cache_global()
 
 bool cache_global::maintain()
 {
+    // Only atomic fast check of pointer. Pointee data not interesting here.
+    // Therefore memory_order_relaxed is sufficient.
     if (!trash.load(std::memory_order_relaxed))
         return false;
     if (clean_lock.test_and_set(std::memory_order_acquire))
         return false;
     bool result = false;
-    void *trash_mtn = trash.exchange(nullptr, std::memory_order_acq_rel);
+    void *trash_mtn = trash.exchange(nullptr, std::memory_order_acquire);
     while (trash_mtn) {
         void *trash_del = trash_mtn;
         trash_mtn = *reinterpret_cast<void **>(trash_mtn);
@@ -217,6 +216,9 @@ bool cache_global::maintain()
             result = true;
         }
     }
+    // Unlock only after loop to protect slabs of objects from trash,
+    // not only trash pointer itself. This slabs are owned by cache_global
+    // (but not pointed explicitly by it).
     clean_lock.clear(std::memory_order_release);
     return result;
 }
@@ -236,6 +238,7 @@ void free_cache_global(cache_global *p)
 /// cache_local
 ///
 
+// Used in single thread (except trash field).
 struct cache_local : list_node<cache_local> {
     // one object, that holds one slab in partial list, to not waste time on
     // moving slab between free and partial lists.
@@ -252,9 +255,9 @@ struct cache_local : list_node<cache_local> {
     unsigned timer;
     unsigned stat_interval;
 
-    size_t align; // align of cached objects
+    size_t align; // alignment of cached objects
     size_t object_size; // size of cached objects
-    size_t slabs_limit = ~0ULL; // maximum number of slabs (soft)
+    size_t slabs_limit = ~0ULL; // maximum number of slabs (soft limit)
 
     // list for objects, freed from foreign threads
     std::atomic<void *> trash = {nullptr};
@@ -268,9 +271,7 @@ struct cache_local : list_node<cache_local> {
     inline static void remove_from_list(slab_header **list, slab_header *slab);
     // put obj to slab's free list and move slab between full/partial/free lists
     inline void return_obj_to_slab(void *obj, slab_header *slab);
-    // allocate one object
-    inline void * alloc_impl();
-    // allocate one object. On fail calls new handler and try again.
+    // allocate one object.
     inline void * alloc();
     // free object obj, which belongs to slab.
     inline void free(void *obj, slab_header *slab);
@@ -334,59 +335,46 @@ inline void cache_local::return_obj_to_slab(void *obj, slab_header *slab)
     slab->put_free(obj);
 }
 
-inline void * cache_local::alloc_impl()
+inline void * cache_local::alloc()
 {
+    --timer;
     if (partial_slabs) {
         slab_header *slab = partial_slabs;
         void *result = slab->alloc();
-        if (slab->free)
+        if (slab->free) {
+            if (timer)
+                return result;
+            maintain(slabs_limit);
             return result;
+        }
         partial_slabs = slab->next;
         if (partial_slabs)
             partial_slabs->prev = nullptr;
         push(&full_slabs, slab);
+        if (timer)
+            return result;
+        maintain(slabs_limit);
         return result;
     }
     else {
         if (!free_slabs) {
             all_slabs_cnt +=
                 create_slabs(align, object_size, this, &free_slabs);
-            if (!free_slabs)
+            if (!free_slabs) {
+                if (!timer)
+                    maintain(slabs_limit);
                 return nullptr;
+            }
         }
         slab_header *slab = free_slabs;
         free_slabs = slab->next;
         if (++used_slabs_cnt > stat_max_used_cnt)
             stat_max_used_cnt = used_slabs_cnt;
         push(&partial_slabs, slab);
+        if (!timer)
+            maintain(slabs_limit);
         return slab->alloc();
     }
-    return nullptr;
-}
-
-inline void * cache_local::alloc()
-{
-    void * result = alloc_impl();
-    if (--timer && result)
-        return result;
-    if (!timer)
-        // reset timer before return
-        maintain(slabs_limit);
-    if (!result) {
-        std::new_handler h = std::get_new_handler();
-        if (h)
-            do {
-                try {
-                    h();
-                }
-                catch (...) {
-                    return nullptr;
-                }
-                result = alloc_impl();
-            }
-            while (!result);
-    }
-    return result;
 }
 
 inline void cache_local::free(void *obj, slab_header *slab)
@@ -408,10 +396,11 @@ bool cache_local::maintain(size_t limit)
     }
 
     if (trash.load(std::memory_order_relaxed)) {
-        void *trash_mtn = trash.exchange(nullptr, std::memory_order_acq_rel);
+        void *trash_mtn = trash.exchange(nullptr, std::memory_order_acquire);
         while (trash_mtn) {
             void *trash_rec = trash_mtn;
             trash_mtn = *reinterpret_cast<void **>(trash_mtn);
+            // Objects in trash lays in slabs of this cache_local.
             return_obj_to_slab(trash_rec, slab_header::slab_of_obj(trash_rec));
             result = true;
         }
@@ -440,29 +429,22 @@ bool cache_local::maintain(size_t limit)
 
 cache::cache(cache_global *global, unsigned stat_interval, size_t align,
         size_t object_size)
-    : global(global),
-      local(new cache_local(stat_interval, align, object_size))
+    : global(global), local(new cache_local(stat_interval, align, object_size))
 {
 }
 
 cache::~cache()
 {
-    if (local->one_hold_partial)
-        // when one_hold_partial is not null, free return obj to slab.
-        free(local->one_hold_partial);
-
-    for (slab_header *slab = local->free_slabs; slab;) {
-        slab_header *p = slab;
-        slab = slab->next;
-        delete_slab(p);
-    }
+    // Move one_hold_partial and trash objects to slabs
+    // while slabs owned by this local cache. Delete all free slabs.
+    local->maintain(0);
 
     auto list_to_global = [this](slab_header *slab) {
         while (slab) {
             // After unlock slab may be deleted. So use it before.
             slab_header *next = slab->next;
             slab->owner_lock.lock();
-            slab->owner.store(global, std::memory_order_release);
+            slab->owner.store(global, std::memory_order_relaxed);
             slab->owner_lock.unlock();
             slab = next;
         }
@@ -470,6 +452,7 @@ cache::~cache()
     list_to_global(local->partial_slabs);
     list_to_global(local->full_slabs);
 
+    // All slabs now owned by global cache.
     // Local trash is unchangeable after moving all slabs to global.
     void *first_trash = local->trash.load(std::memory_order_acquire);
     if (first_trash) {
@@ -495,16 +478,7 @@ void * cache::alloc() noexcept
 void cache::free(void *obj) noexcept
 {
     slab_header *slab = slab_header::slab_of_obj(obj);
-
-    // It's important to protect from false positives here. For example:
-    // 1. Thread A make trash, which is similar its own legal slab.
-    // 2. Thread A deletes this memory and returns it to system.
-    // 3. Thread B allocates the same memory for slab.
-    //    owner of this slab points to cache_local of B.
-    // 4. Thread B allocates object from those slab and returns it to thread A.
-    // 5. Thread A in this point must see, that object belongs to thread B, not
-    //    to thread A. It is possible only loading atomic with consume.
-    if (slab->owner.load(std::memory_order_consume) == local.get()) {
+    if (slab->owner.load(std::memory_order_relaxed) == local.get()) {
         local->free(obj, slab);
         return;
     }
@@ -515,13 +489,11 @@ void cache::free(void *obj) noexcept
     std::atomic<void *> &trash = (owner == global
         ? global->trash
         : reinterpret_cast<cache_local *>(owner)->trash);
-    assert(trash.is_lock_free()); // needed for reentering in signals
     // Note: the below use is not thread-safe in at least
     // GCC prior to 4.8.3 (bug 60272), clang prior to 2014-05-05 (bug 18899)
     // MSVC prior to 2014-03-17 (bug 819819). So update your compiler.
     *reinterpret_cast<void **>(obj) = trash.load(std::memory_order_relaxed);
-    while (!trash.compare_exchange_weak(
-                *reinterpret_cast<void **>(obj), obj,
+    while (!trash.compare_exchange_weak(*reinterpret_cast<void **>(obj), obj,
                 std::memory_order_release, std::memory_order_relaxed)) {}
 }
 
