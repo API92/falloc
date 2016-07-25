@@ -198,8 +198,6 @@ cache_global::~cache_global()
 
 bool cache_global::maintain()
 {
-    // Only atomic fast check of pointer. Pointee data not interesting here.
-    // Therefore memory_order_relaxed is sufficient.
     if (!trash.load(std::memory_order_relaxed))
         return false;
     if (clean_lock.test_and_set(std::memory_order_acquire))
@@ -484,7 +482,6 @@ void cache::free(void *obj) noexcept
     }
 
     boost::detail::spinlock::scoped_lock lock(slab->owner_lock);
-    // spinlock is the barrier, therefore memory_order_relaxed is sufficient
     void *owner = slab->owner.load(std::memory_order_relaxed);
     std::atomic<void *> &trash = (owner == global
         ? global->trash
