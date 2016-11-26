@@ -509,22 +509,6 @@ bool cache::clear_local() noexcept
     return local->maintain(0);
 }
 
-void * cache::alloc_with_new_handler() noexcept
-{
-    if (void *result = alloc())
-        return result;
-    while (std::new_handler handler = std::get_new_handler())
-        try {
-            handler();
-            if (void *result = alloc())
-                return result;
-        }
-        catch (...) {
-            return nullptr;
-        }
-    return nullptr;
-}
-
 } // namespace detail
 
 bool maintain_all_caches() noexcept
@@ -561,37 +545,6 @@ bool clear_all_caches() noexcept
         result |= l->get()->maintain();
     detail::global_maintain_list_lock.unlock();
     return result;
-}
-
-namespace {
-
-std::new_handler old_new_handler = nullptr;
-
-struct push_new_handler {
-    push_new_handler()
-    {
-        old_new_handler = std::set_new_handler(new_handler);
-    }
-
-    ~push_new_handler()
-    {
-        std::set_new_handler(old_new_handler);
-    }
-} push_new_handler_;
-
-} // namespace
-
-void new_handler()
-{
-    if (maintain_all_caches())
-        return;
-    if (clear_all_caches())
-        return;
-    if (old_new_handler) {
-        old_new_handler();
-        return;
-    }
-    throw std::bad_alloc();
 }
 
 } // namespace falloc

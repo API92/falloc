@@ -21,7 +21,13 @@ add_library(${PROJECT_NAME}
     falloc/cache.hpp
     falloc/impexp.hpp
     src/cache.cpp
+    src/new_handler.cpp
 )
+
+set(CMAKE_SHARED_LINKER_FLAGS ${CMAKE_SHARED_LINKER_FLAGS} "-Wl,--no-undefined")
+target_compile_options(${PROJECT_NAME} PUBLIC -fno-exceptions -fno-rtti)
+set_source_files_properties(
+    src/new_handler.cpp PROPERTIES COMPILE_FLAGS "-fexceptions -frtti")
 
 if (NOT Boost_system_FOUND)
     find_package(Boost COMPONENTS system REQUIRED)
