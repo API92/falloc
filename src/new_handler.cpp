@@ -1,10 +1,10 @@
-#include <falloc/cache.hpp>
+#include <falloc/pool.hpp>
+
+#include <new>
 
 namespace falloc {
 
-namespace detail {
-
-void * cache::alloc_with_new_handler() noexcept
+void * pool_local::alloc_with_new_handler() noexcept
 {
     if (void *result = alloc())
         return result;
@@ -19,8 +19,6 @@ void * cache::alloc_with_new_handler() noexcept
         }
     return nullptr;
 }
-
-} // namespace detail
 
 namespace {
 
@@ -42,9 +40,9 @@ struct push_new_handler {
 
 void new_handler()
 {
-    if (maintain_all_caches())
+    if (maintain_all_pools())
         return;
-    if (clear_all_caches())
+    if (clear_all_pools())
         return;
     if (old_new_handler) {
         old_new_handler();

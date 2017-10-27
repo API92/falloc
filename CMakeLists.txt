@@ -17,12 +17,8 @@ include_directories(.)
 
 add_definitions(-DFALLOC_EXPORTS)
 
-add_library(${PROJECT_NAME}
-    falloc/cache.hpp
-    falloc/impexp.hpp
-    src/cache.cpp
-    src/new_handler.cpp
-)
+file(GLOB_RECURSE sources_list "falloc/*.hpp" "src/*.cpp")
+add_library(${PROJECT_NAME} ${sources_list})
 
 set(CMAKE_SHARED_LINKER_FLAGS ${CMAKE_SHARED_LINKER_FLAGS} "-Wl,--no-undefined")
 target_compile_options(${PROJECT_NAME} PUBLIC -fno-exceptions -fno-rtti)

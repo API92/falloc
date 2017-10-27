@@ -10,7 +10,7 @@
 #   falloc_LIBRARY - the falloc libraries needed for linking
 
 find_path(falloc_INCLUDE_DIR
-    NAME falloc/cache.hpp
+    NAME falloc/pool.hpp
     PATHS ${CMAKE_CURRENT_LIST_DIR})
 
 find_library(falloc_LIBRARY
