@@ -24,31 +24,27 @@ constexpr unsigned size_to_idx(unsigned size)
 
 struct pool_local;
 
-// must be used only in one thread
-class gp_allocator {
+// Must be used only in one thread.
+class FALLOC_IMPEXP gp_allocator_local {
 public:
     static constexpr unsigned MAX_POOLED_SIZE = 2000;
-    gp_allocator(size_t stat_interval = 0x10000000) noexcept;
-    ~gp_allocator() = default;
+    gp_allocator_local(size_t stat_interval = 0x10000000) noexcept;
+    ~gp_allocator_local() = default;
 
     void * allocate(size_t size) noexcept;
     void free(void *p) noexcept;
 
 private:
-    gp_allocator(gp_allocator const &) = delete;
-    gp_allocator(gp_allocator &&) = delete;
-    void operator = (gp_allocator const &) = delete;
-    void operator = (gp_allocator &&) = delete;
+    gp_allocator_local(gp_allocator_local const &) = delete;
+    gp_allocator_local(gp_allocator_local &&) = delete;
+    void operator = (gp_allocator_local const &) = delete;
+    void operator = (gp_allocator_local &&) = delete;
 
-    union u {
-        pool_local pools[size_to_idx(MAX_POOLED_SIZE) + 1];
-        u() : pools() {}
-        ~u() { /* don't clear pools because they may be used */ }
-    }
-    _u;
+    pool_local pools_[size_to_idx(MAX_POOLED_SIZE) + 1];
 };
 
 FALLOC_IMPEXP void * allocate(size_t size) noexcept;
 FALLOC_IMPEXP void free(void *ptr) noexcept;
+FALLOC_IMPEXP bool maintain_allocator() noexcept;
 
 } // namespace falloc

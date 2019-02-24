@@ -32,6 +32,8 @@ FALLOC_IMPEXP void new_handler();
 class pool_global {
 public:
     std::atomic<void *> trash = {nullptr};
+    // Singly linked list of slabs which can not be munmaped.
+    slab_header *free_slabs = nullptr;
     std::atomic_flag clean_lock = ATOMIC_FLAG_INIT;
 
     static pool_global & instance();

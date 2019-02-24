@@ -1,3 +1,4 @@
+#include <falloc/gp_allocator.hpp>
 #include <falloc/pool.hpp>
 
 #include <new>
@@ -40,7 +41,7 @@ struct push_new_handler {
 
 void new_handler()
 {
-    if (maintain_all_pools())
+    if (maintain_allocator())
         return;
     if (clear_all_pools())
         return;

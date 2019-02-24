@@ -6,7 +6,6 @@
 
 #include <atomic> // atomic
 #include <cassert> // assert
-#include <cstdlib> // abort
 #include <memory> // align
 
 #include <boost/smart_ptr/detail/spinlock.hpp>
@@ -103,12 +102,10 @@ int create_slabs(size_t object_size, void *owner, slab_header **list)
     return cnt;
 }
 
-void delete_slab(slab_header *slab)
+bool delete_slab(slab_header *slab)
 {
     // At this moment slab can't be used from other threads.
-    if (!munmap(slab, PAGESIZE))
-        return;
-    std::abort();
+    return !munmap(slab, PAGESIZE);
 }
 
 
@@ -141,13 +138,41 @@ bool pool_global::maintain()
         slab_header *slab = slab_of_obj(trash_del);
         slab->put_free(trash_del);
         if (!slab->used_cnt) {
-            delete_slab(slab);
-            result = true;
+            if (delete_slab(slab))
+                result = true;
+            else {
+                slab->next = free_slabs;
+                free_slabs = slab;
+            }
         }
     }
+
+    for (bool slabs_deleted = true; slabs_deleted;) {
+        slabs_deleted = false;
+        // munmap may fail if unmaping should split mapped region into two ones
+        // and make number of mapped regions greater then vm.max_map_count.
+        // In this case try unmap in different orders. May be we will find such
+        // an order in which regions unmapped from ends of mapped regions.
+        slab_header *not_deleted = nullptr;
+        while (free_slabs) {
+            slab_header *p = free_slabs;
+            free_slabs = free_slabs->next;
+            if (delete_slab(p))
+                slabs_deleted = result = true;
+            else {
+                p->next = not_deleted;
+                not_deleted = p;
+            }
+        }
+        free_slabs = not_deleted;
+    }
+
+
     // Unlock only after loop to protect slabs of objects from trash,
-    // not only trash pointer itself. This slabs are owned by pool_global
-    // (but not pointed explicitly by it).
+    // not only trash pointer itself. This slabs are owned by pool_global,
+    // but pool_global::maintain may be called from different threads.
+    // After reseting trash to nullptr it may be reseted from other thread again
+    // to non-null with object belonging to the same slab.
     clean_lock.clear(std::memory_order_release);
     return result;
 }
@@ -342,12 +367,31 @@ bool pool_local::maintain(size_t limit)
         }
     }
 
-    while (all_slabs_cnt > limit && free_slabs) {
-        slab_header *p = free_slabs;
-        free_slabs = free_slabs->next;
-        --all_slabs_cnt;
-        delete_slab(p);
-        result = true;
+    for (bool slabs_deleted = true; slabs_deleted;) {
+        slabs_deleted = false;
+        // munmap may fail if unmaping should split mapped region into two ones
+        // and make number of mapped regions greater then vm.max_map_count.
+        // In this case try unmap in different orders. May be we will find such
+        // an order in which regions unmapped from ends of mapped regions.
+        slab_header *not_deleted_first = nullptr, *not_deleted_last = nullptr;
+        while (all_slabs_cnt > limit && free_slabs) {
+            slab_header *p = free_slabs;
+            free_slabs = free_slabs->next;
+            if (delete_slab(p)) {
+                --all_slabs_cnt;
+                slabs_deleted = result = true;
+            }
+            else {
+                p->next = not_deleted_first;
+                not_deleted_first = p;
+                if (!not_deleted_last)
+                    not_deleted_last = p;
+            }
+        }
+        if (not_deleted_last) {
+            not_deleted_last->next = free_slabs;
+            free_slabs = not_deleted_first;
+        }
     }
 
     if (!timer) {
