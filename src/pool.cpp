@@ -131,7 +131,7 @@ bool pool_global::maintain()
     if (clean_lock.test_and_set(std::memory_order_acquire))
         return false;
     bool result = false;
-    void *trash_mtn = trash.exchange(nullptr, std::memory_order_acquire);
+    void *trash_mtn = trash.exchange(nullptr, std::memory_order_consume);
     while (trash_mtn) {
         void *trash_del = trash_mtn;
         trash_mtn = *reinterpret_cast<void **>(trash_mtn);
@@ -226,7 +226,7 @@ pool_local::~pool_local()
 
     // All slabs now owned by global pool.
     // Local trash is unchangeable after moving all slabs to global.
-    void *first_trash = trash.load(std::memory_order_acquire);
+    void *first_trash = trash.load(std::memory_order_consume);
     if (first_trash) {
         void *last_trash = first_trash;
         while (*reinterpret_cast<void **>(last_trash))
@@ -357,7 +357,7 @@ bool pool_local::maintain(size_t limit)
     }
 
     if (trash.load(std::memory_order_relaxed)) {
-        void *trash_mtn = trash.exchange(nullptr, std::memory_order_acquire);
+        void *trash_mtn = trash.exchange(nullptr, std::memory_order_consume);
         while (trash_mtn) {
             void *trash_rec = trash_mtn;
             trash_mtn = *reinterpret_cast<void **>(trash_mtn);
