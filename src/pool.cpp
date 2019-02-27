@@ -11,6 +11,9 @@
 #include <boost/smart_ptr/detail/spinlock.hpp>
 #include <sys/mman.h>
 
+#define likely(x)       __builtin_expect((x),1)
+#define unlikely(x)     __builtin_expect((x),0)
+
 namespace falloc {
 
 ///
@@ -77,7 +80,7 @@ inline void slab_header::put_free(void *obj)
     --used_cnt;
 }
 
-int create_slabs(size_t object_size, void *owner, slab_header **list)
+int create_slabs(unsigned object_size, void *owner, slab_header **list)
 {
     size_t cnt = 4;
     char *p = nullptr;
@@ -188,8 +191,8 @@ thread_local list_node<pool_local> local_maintain_list;
 
 } // namespace
 
-pool_local::pool_local(size_t object_size, unsigned stat_interval)
-    : timer(stat_interval), stat_interval(stat_interval),
+pool_local::pool_local(unsigned object_size, unsigned stat_interval)
+    : stat_interval(stat_interval), timer(stat_interval),
     object_size(object_size)
 {
     local_maintain_list.append(this);
@@ -197,7 +200,7 @@ pool_local::pool_local(size_t object_size, unsigned stat_interval)
 
 pool_local::pool_local() : pool_local(0, 0x10000000) {}
 
-void pool_local::init(size_t object_size, unsigned stat_interval)
+void pool_local::init(unsigned object_size, unsigned stat_interval)
 {
     assert(!all_slabs_cnt);
     timer = this->stat_interval = stat_interval;
@@ -266,12 +269,12 @@ inline void pool_local::remove_from_list(slab_header **list, slab_header *slab)
 
 inline void pool_local::return_obj_to_slab(void *obj, slab_header *slab)
 {
-    if (!slab->free) {
+    if (unlikely(!slab->free)) {
         // slab in full list now. Move it to partial.
         remove_from_list(&full_slabs, slab);
         push(&partial_slabs, slab);
     }
-    else if (slab->used_cnt == 1) {
+    else if (unlikely(slab->used_cnt == 1)) {
         // slab will be free after putting object. Move it from partial to free.
         remove_from_list(&partial_slabs, slab);
         slab->next = free_slabs;

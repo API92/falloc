@@ -105,7 +105,7 @@ void * gp_allocator_local::allocate(size_t size) noexcept
             return nullptr;
         p[0] = MAX_POOLED_SIZE + 1;
         p[1] = static_cast<unsigned>(pages_cnt);
-        return p + 2;
+        return p + 64 / sizeof(unsigned);
 
         return nullptr;
     }

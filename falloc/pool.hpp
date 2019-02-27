@@ -79,31 +79,34 @@ struct list_node {
 
 // Used in single thread (except trash field).
 struct pool_local : list_node<pool_local> {
-    // one object, that holds one slab in partial list, to not waste time on
-    // moving slab between free and partial lists.
-    void *one_hold_partial = nullptr;
 
-    // this lists used only in owner thread
-    slab_header *partial_slabs = nullptr; // double linked
-    slab_header *free_slabs = nullptr; // singly linked
-    slab_header *full_slabs = nullptr; // double linked
-    size_t used_slabs_cnt = 0; // number of slabs in partial and full lists
-    size_t all_slabs_cnt = 0; // number of slabs in all lists
-    size_t stat_max_used_cnt = 0; // maximum of used_slabs_cnt within interval
-
-    unsigned timer;
-    unsigned stat_interval;
-
-    size_t object_size; // size of pooled objects
-    size_t slabs_limit = ~0ULL; // maximum number of slabs (soft limit)
+    size_t all_slabs_cnt = 0; // number of slabs in all lists #cold
+    size_t slabs_limit = ~0ULL; // maximum number of slabs (soft limit) #cold
+    unsigned stat_interval; // #cold
 
     // list for objects, freed from foreign threads
-    std::atomic<void *> trash = {nullptr};
+    std::atomic<void *> trash = {nullptr}; // #invalidates cache line
 
-    pool_local(size_t object_size, unsigned stat_interval);
+    alignas(64) // one cache line for hot and warm members
+    // one object, that holds one slab in partial list, to not waste time on
+    // moving slab between free and partial lists.
+    void *one_hold_partial = nullptr; // #hot
+
+    unsigned timer; // #hot
+    unsigned object_size; // size of pooled objects #cold
+
+    // this lists used only in owner thread
+    slab_header *partial_slabs = nullptr; // double linked #hot
+    slab_header *free_slabs = nullptr; // singly linked #warm
+    slab_header *full_slabs = nullptr; // double linked #warm
+
+    size_t used_slabs_cnt = 0; // number of slabs in partial and full lists #warm
+    size_t stat_max_used_cnt = 0; // maximum of used_slabs_cnt within interval #warm
+
+    pool_local(unsigned object_size, unsigned stat_interval);
     ~pool_local();
     pool_local();
-    void init(size_t object_size, unsigned stat_interval);
+    void init(unsigned object_size, unsigned stat_interval);
 
     // push slab into the begining of the list
     inline static void push(slab_header **list, slab_header *slab);
