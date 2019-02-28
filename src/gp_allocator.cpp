@@ -8,6 +8,8 @@
 
 #include <sys/mman.h>
 
+#include "consume_ordering.hpp"
+
 namespace falloc {
 
 
@@ -56,7 +58,7 @@ inline bool global_trash::clean() noexcept
     bool result = false;
     for (bool unmaped = true; unmaped;) {
         unmaped = false;
-        void *p = free_list_.exchange(nullptr, std::memory_order_consume);
+        void *p = exchange_consume(free_list_, nullptr);
         while (p) {
             size_t *r = reinterpret_cast<size_t *>(p);
             p = *reinterpret_cast<void **>(p);
