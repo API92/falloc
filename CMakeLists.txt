@@ -21,12 +21,6 @@ target_compile_options(${PROJECT_NAME} PUBLIC -fno-exceptions -fno-rtti)
 set_source_files_properties(
     src/new_handler.cpp PROPERTIES COMPILE_FLAGS "-fexceptions -frtti")
 
-if (NOT Boost_system_FOUND)
-    find_package(Boost COMPONENTS system REQUIRED)
-endif()
-include_directories(${Boost_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} ${Boost_LIBRARIES})
-
 target_link_libraries(${PROJECT_NAME} ${CMAKE_THREAD_LIBS_INIT})
 
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_EXTENSIONS OFF)

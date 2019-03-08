@@ -51,27 +51,11 @@ private:
 
 template<typename T>
 struct list_node {
-    list_node() : next(this), prev(this) {}
+    inline list_node();
 
-    T * get()
-    {
-        return static_cast<T *>(this);
-    }
-
-    void append(list_node *other)
-    {
-        other->next = next;
-        next->prev = other;
-        next = other;
-        other->prev = this;
-    }
-
-    void remove()
-    {
-        next->prev = prev;
-        prev->next = next;
-        next = prev = this;
-    }
+    inline T * get();
+    inline void append(list_node *other);
+    inline void remove();
 
     list_node *next;
     list_node *prev;

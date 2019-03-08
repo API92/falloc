@@ -7,16 +7,44 @@
 #include <atomic> // atomic
 #include <cassert> // assert
 #include <memory> // align
+#include <mutex> // lock_guard
 
-#include <boost/smart_ptr/detail/spinlock.hpp>
 #include <sys/mman.h>
 
 #include "consume_ordering.hpp"
+#include "spinlock.hpp"
 
 #define likely(x)       __builtin_expect((x),1)
 #define unlikely(x)     __builtin_expect((x),0)
 
 namespace falloc {
+
+template<typename T>
+inline list_node<T>::list_node() : next(this), prev(this) {}
+
+template<typename T>
+inline T * list_node<T>::get()
+{
+    return static_cast<T *>(this);
+}
+
+template<typename T>
+inline void list_node<T>::append(list_node *other)
+{
+    other->next = next;
+    next->prev = other;
+    next = other;
+    other->prev = this;
+}
+
+template<typename T>
+inline void list_node<T>::remove()
+{
+    next->prev = prev;
+    prev->next = next;
+    next = prev = this;
+}
+
 
 ///
 /// slab_header
@@ -29,7 +57,7 @@ struct slab_header {
     void *free = nullptr;
     slab_header *next = nullptr;
     slab_header *prev = nullptr;
-    boost::detail::spinlock owner_lock;
+    spinlock owner_lock;
     std::atomic<void *> owner = {nullptr};
 
     void init(unsigned size);
@@ -337,7 +365,7 @@ void pool_local::free(void *obj)
             return void(one_hold_partial = obj);
     }
 
-    boost::detail::spinlock::scoped_lock lock(slab->owner_lock);
+    std::lock_guard<spinlock> lock(slab->owner_lock);
     void *owner = slab->owner.load(std::memory_order_relaxed);
     pool_global *global = &pool_global::instance();
     std::atomic<void *> &trash = (owner == global
