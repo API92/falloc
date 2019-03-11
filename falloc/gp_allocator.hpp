@@ -11,18 +11,17 @@ namespace falloc {
 
 static constexpr unsigned idx_frac_bits = 2;
 
-constexpr unsigned log2floor(unsigned x)
+[[gnu::always_inline]]
+constexpr inline unsigned log2floor(unsigned x)
 {
     return __builtin_clz(x)  ^ (std::numeric_limits<unsigned>::digits - 1);
 }
 
+[[gnu::always_inline]]
 constexpr unsigned size_to_idx(unsigned size)
 {
-    unsigned lg = log2floor(size);
-    return (lg << idx_frac_bits) + ((size - 1) >> (lg - idx_frac_bits));
+    return log2floor((size << 1) - 1);
 }
-
-struct pool_local;
 
 // Must be used only in one thread.
 class FALLOC_IMPEXP gp_allocator_local {
@@ -32,7 +31,9 @@ public:
     ~gp_allocator_local() = default;
 
     void * allocate(size_t size) noexcept;
+    [[gnu::always_inline]] inline void * allocate_inline(size_t size) noexcept;
     void free(void *p) noexcept;
+    [[gnu::always_inline]] inline void free_inline(void *p) noexcept;
 
 private:
     gp_allocator_local(gp_allocator_local const &) = delete;
@@ -42,9 +43,5 @@ private:
 
     pool_local pools_[size_to_idx(MAX_POOLED_SIZE) + 1];
 };
-
-FALLOC_IMPEXP void * allocate(size_t size) noexcept;
-FALLOC_IMPEXP void free(void *ptr) noexcept;
-FALLOC_IMPEXP bool maintain_allocator() noexcept;
 
 } // namespace falloc

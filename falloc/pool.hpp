@@ -13,20 +13,33 @@
 namespace falloc {
 
 constexpr long PAGESIZE = 4096;
-constexpr uintptr_t PAGESTART_MASK = ~(uintptr_t)PAGESIZE + 1;
+constexpr long HUGEPAGESIZE = 2 << 20;
+constexpr uintptr_t HUGEPAGESTART_MASK = ~(uintptr_t)HUGEPAGESIZE + 1;
 
 struct slab_header;
 
-inline static slab_header * slab_of_obj(void *obj)
+[[gnu::always_inline]]
+inline slab_header * slab_of_obj(void *obj)
 {
-    return reinterpret_cast<slab_header *>((uintptr_t)obj & PAGESTART_MASK);
+    return reinterpret_cast<slab_header *>((uintptr_t)obj & HUGEPAGESTART_MASK);
 }
 
-/// Returns trash in pools into slabs.
-FALLOC_IMPEXP bool maintain_all_pools() noexcept;
-/// Returns trash in pools into slabs and delete all free slabs.
-FALLOC_IMPEXP bool clear_all_pools() noexcept;
-FALLOC_IMPEXP void new_handler();
+// Storage for memory regions that cannot be unmaped.
+class global_trash {
+public:
+    struct already_initialized {};
+
+    global_trash() noexcept;
+    global_trash(already_initialized) noexcept;
+
+    void add_region(void *p, size_t size) noexcept;
+    bool clean() noexcept;
+
+private:
+    std::atomic<void *> free_list_;
+};
+
+extern class global_trash global_trash;
 
 
 class pool_global {
@@ -62,10 +75,11 @@ struct list_node {
 };
 
 // Used in single thread (except trash field).
-struct pool_local : list_node<pool_local> {
+struct FALLOC_IMPEXP pool_local : list_node<pool_local> {
 
     size_t all_slabs_cnt = 0; // number of slabs in all lists #cold
     size_t slabs_limit = ~0ULL; // maximum number of slabs (soft limit) #cold
+    unsigned alignment; // #cold
     unsigned stat_interval; // #cold
 
     // list for objects, freed from foreign threads
@@ -87,10 +101,10 @@ struct pool_local : list_node<pool_local> {
     size_t used_slabs_cnt = 0; // number of slabs in partial and full lists #warm
     size_t stat_max_used_cnt = 0; // maximum of used_slabs_cnt within interval #warm
 
-    pool_local(unsigned object_size, unsigned stat_interval);
+    pool_local(unsigned object_size, unsigned alignment, unsigned stat_interval);
     ~pool_local();
     pool_local();
-    void init(unsigned object_size, unsigned stat_interval);
+    void init(unsigned object_size, unsigned alignment, unsigned stat_interval);
 
     // push slab into the begining of the list
     inline static void push(slab_header **list, slab_header *slab);
@@ -99,16 +113,18 @@ struct pool_local : list_node<pool_local> {
     // put obj to slab's free list and move slab between full/partial/free lists
     inline void return_obj_to_slab(void *obj, slab_header *slab);
     // allocate one object.
-    void * alloc();
+    FALLOC_IMPEXP void * alloc() noexcept;
+    inline void * alloc_inline() noexcept;
     // free object obj if it's owned by this pool.
     // Else put it into owner's trash.
-    void free(void *obj);
+    FALLOC_IMPEXP void free(void *obj) noexcept;
+    inline void free_inline(void *obj) noexcept;
     // return objects from trash to their slabs, leave maximum free_slabs_limit
     // slabs in free list.
-    bool maintain(size_t slabs_limit);
+    FALLOC_IMPEXP bool maintain(size_t slabs_limit);
 
     // Tries to allocate. Else calls std::get_new_handler() and tries again.
-    void * alloc_with_new_handler() noexcept;
+    FALLOC_IMPEXP void * alloc_with_new_handler() noexcept;
 };
 
 

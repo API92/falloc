@@ -4,82 +4,70 @@
 
 #pragma once
 
-#include <atomic> // atomic
-#include <memory> // unique_ptr
-
 #include <falloc/impexp.hpp>
+#include <falloc/pool.hpp>
 
 namespace falloc {
-
-struct pool_local;
-
-// object of this class must be used only in those thread,
-// in which it was created.
-class FALLOC_IMPEXP object_pool_impl {
-public:
-    // ctor and dtor must be called in the same thread for properly deletion
-    // from maintain list.
-    object_pool_impl(size_t object_size, unsigned stat_interval);
-    ~object_pool_impl();
-
-    void * alloc() noexcept;
-    void free(void *obj) noexcept;
-
-    bool maintain_local() noexcept;
-    bool clear_local() noexcept;
-
-    // Tries to allocate. Else calls std::get_new_handler() and tries again.
-    void * alloc_with_new_handler() noexcept;
-
-private:
-    std::unique_ptr<pool_local> local;
-};
 
 template<typename Object, typename Tag = void>
 class object_pool {
 public:
-    static Object * alloc()
+    [[gnu::always_inline]]
+    static inline Object * alloc() noexcept
     {
         return reinterpret_cast<Object *>(impl().alloc());
     }
 
+    [[gnu::always_inline]]
     static Object * alloc_with_new_handler() noexcept
     {
         return reinterpret_cast<Object *>(impl().alloc_with_new_handler());
     }
 
-    static void free(Object *p) { impl().free(p); }
-
-    static void maintain()
+    [[gnu::always_inline]]
+    static inline void free(Object *p) noexcept
     {
-        impl().maintain_local();
+        impl().free(p);
     }
 
-    static void clear()
+    static void maintain() noexcept
     {
-        impl().clear_local();
+        impl().maintain(impl().slabs_limit);
     }
 
-    struct set_stat_interval {
-        set_stat_interval(unsigned stat_interval)
+    static void clear() noexcept
+    {
+        impl().maintain(0);
+    }
+
+    static void set_stat_interval(unsigned x) noexcept
+    {
+        stat_interval = x;
+        impl().stat_interval = x;
+    }
+
+    struct stat_interval_setter {
+        stat_interval_setter(unsigned stat_interval) noexcept
         {
-            object_pool::stat_interval = stat_interval;
+            set_stat_interval(stat_interval);
         }
     };
 
 private:
-    static object_pool_impl & impl()
+    [[gnu::always_inline]]
+    static inline pool_local & impl() noexcept
     {
-        static thread_local object_pool_impl impl_inst(
-            sizeof(Object), stat_interval);
-        return impl_inst;
+        static thread_local pool_local impl_(sizeof(Object), alignof(Object),
+                stat_interval);
+        return impl_;
     }
 
     static unsigned stat_interval;
 };
 
+
 template<typename Object, typename Tag>
-unsigned object_pool<Object, Tag>::stat_interval(0x10000000);
+unsigned object_pool<Object, Tag>::stat_interval = 0x10000000;
 
 } // namespace falloc
 
