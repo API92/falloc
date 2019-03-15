@@ -12,17 +12,7 @@
 
 namespace falloc {
 
-constexpr long PAGESIZE = 4096;
-constexpr long HUGEPAGESIZE = 2 << 20;
-constexpr uintptr_t HUGEPAGESTART_MASK = ~(uintptr_t)HUGEPAGESIZE + 1;
-
 struct slab_header;
-
-[[gnu::always_inline]]
-inline slab_header * slab_of_obj(void *obj)
-{
-    return reinterpret_cast<slab_header *>((uintptr_t)obj & HUGEPAGESTART_MASK);
-}
 
 // Storage for memory regions that cannot be unmaped.
 class global_trash {

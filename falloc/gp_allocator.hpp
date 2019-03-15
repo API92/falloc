@@ -32,8 +32,10 @@ public:
 
     void * allocate(size_t size) noexcept;
     [[gnu::always_inline]] inline void * allocate_inline(size_t size) noexcept;
+    void * allocate_zeroed(size_t size) noexcept;
     void free(void *p) noexcept;
     [[gnu::always_inline]] inline void free_inline(void *p) noexcept;
+    void * resize(void *p, size_t size) noexcept;
 
 private:
     gp_allocator_local(gp_allocator_local const &) = delete;
