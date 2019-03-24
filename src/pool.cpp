@@ -640,6 +640,9 @@ inline void gp_allocator_local::free_inline(void *p) noexcept
 
 void * gp_allocator_local::resize(void *p, size_t nsize) noexcept
 {
+    if (unlikely(!p))
+        return allocate_inline(nsize);
+
     void *page_start = page_of_obj(p);
     unsigned objsize = *reinterpret_cast<unsigned *>(page_start);
     size_t size;
