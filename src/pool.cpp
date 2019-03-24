@@ -709,7 +709,8 @@ FALLOC_IMPEXP void * calloc(size_t num, size_t size) noexcept
 
 FALLOC_IMPEXP void free(void *p) noexcept
 {
-    falloc::default_gp_allocator.free_inline(p);
+    if (p)
+        falloc::default_gp_allocator.free_inline(p);
 }
 
 FALLOC_IMPEXP void * realloc(void *p, size_t size)
