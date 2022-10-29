@@ -8,6 +8,7 @@
 #include <atomic> // atomic
 #include <cassert> // assert
 #include <cstring> // memset
+#include <limits> // numeric_limits
 #include <memory> // align
 #include <mutex> // lock_guard
 
@@ -16,8 +17,9 @@
 #include "consume_ordering.hpp"
 #include "spinlock.hpp"
 
-#define likely(x)       __builtin_expect((x),1)
-#define unlikely(x)     __builtin_expect((x),0)
+#ifndef MAP_HUGE_2MB
+constexpr int MAP_HUGE_2MB = (21 << MAP_HUGE_SHIFT);
+#endif
 
 namespace falloc {
 
@@ -115,12 +117,21 @@ class global_trash global_trash(global_trash::already_initialized{});
 
 
 ///
+/// header_base
+///
+
+struct header_base {
+    // obj_size used to distinguish slab_header from pages of large allocator
+    // with large_obj_header
+    unsigned obj_size;
+};
+
+
+///
 /// slab_header
 ///
 
-struct slab_header {
-    // obj_size used to distinguish slab_header from pages of large allocator
-    unsigned obj_size;
+struct slab_header : header_base {
     int used_cnt = 0;
     void *free = nullptr;
     slab_header *next = nullptr;
@@ -135,17 +146,25 @@ struct slab_header {
 
 bool slab_header::init(unsigned size, unsigned alignment)
 {
+    if (!std::has_single_bit(alignment))
+        return false;
+
     size_t real_size = size;
     // free object will contain pointer to the next free at its begining.
     if (size < sizeof(void *))
         size = sizeof(void *);
+    if (unsigned rem = size % alignment)
+        size += alignment - rem;
 
     char *p = reinterpret_cast<char *>(this) + sizeof(*this);
     char *end = reinterpret_cast<char *>(this) + HUGEPAGESIZE;
     char *page = reinterpret_cast<char *>(page_of_obj(p));
     void **last = &free;
     while (p < end) {
-        *reinterpret_cast<unsigned *>(page) = real_size; // assign to obj_size
+        // assign to slab_header::obj_size
+        *reinterpret_cast<header_base *>(page) = {
+            .obj_size = static_cast<unsigned>(real_size),
+        };
         char *page_end = page + PAGESIZE;
         size_t space = page_end - p;
         if (!std::align(alignment, size, reinterpret_cast<void *&>(p), space))
@@ -193,9 +212,6 @@ int create_slabs(unsigned object_size, unsigned alignment, void *owner,
         slab_header **list)
 {
     int cnt;
-#ifndef MAP_HUGE_2MB
-    constexpr int MAP_HUGE_2MB = (21 << MAP_HUGE_SHIFT);
-#endif
     char *p = (char *)mmap(nullptr, HUGEPAGESIZE, PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
     if (p == MAP_FAILED || !p) { // Allow zero page to leak.
@@ -322,8 +338,8 @@ thread_local list_node<pool_local> local_maintain_list;
 } // namespace
 
 pool_local::pool_local(unsigned object_size, unsigned alignment,
-        unsigned stat_interval)
-    : alignment(alignment), stat_interval(stat_interval), timer(stat_interval),
+        unsigned stat_interval) :
+    alignment(alignment), stat_interval(stat_interval), timer(stat_interval),
     object_size(object_size)
 {
     local_maintain_list.append(this);
@@ -402,12 +418,12 @@ inline void pool_local::remove_from_list(slab_header **list, slab_header *slab)
 
 inline void pool_local::return_obj_to_slab(void *obj, slab_header *slab)
 {
-    if (unlikely(!slab->free)) {
+    if (!slab->free) [[unlikely]] {
         // slab in full list now. Move it to partial.
         remove_from_list(&full_slabs, slab);
         push(&partial_slabs, slab);
     }
-    else if (unlikely(slab->used_cnt == 1)) {
+    else if (slab->used_cnt == 1) [[unlikely]] {
         // slab will be free after putting object. Move it from partial to free.
         remove_from_list(&partial_slabs, slab);
         slab->next = free_slabs;
@@ -579,44 +595,115 @@ bool clear_all_pools() noexcept
 // gp_allocator_local
 //
 
+struct gp_allocator_local::large_obj_header : header_base
+{
+    unsigned page_size;
+    char *allocation_start;
+    size_t allocated_size;
+};
+
 gp_allocator_local::gp_allocator_local(size_t stat_interval) noexcept
 {
     for (size_t sz = MAX_POOLED_SIZE; sz > 0; --sz) {
         size_t idx = size_to_idx(sz);
         if (pools_[idx].object_size)
             continue;
-        pools_[idx].init(sz, std::min(64U, (1U << log2floor(sz))),
+        pools_[idx].init(sz, std::min(LARGE_ALIGNMENT, (1U << log2floor(sz))),
                 stat_interval);
     }
 }
 
-[[gnu::always_inline]]
-inline void * gp_allocator_local::allocate_inline(size_t size) noexcept
+[[gnu::always_inline]] inline
+void *
+gp_allocator_local::allocate_inline(size_t size, size_t alignment) noexcept
 {
-    if (likely(likely(size) && likely(size <= MAX_POOLED_SIZE)))
+    if (size && size <= MAX_POOLED_SIZE && !alignment) [[likely]]
         return pools_[size_to_idx(size)].alloc_inline();
-    else if (size) {
-        void *p = mmap(nullptr, size + 64,
-                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (p == MAP_FAILED)
-            return nullptr;
-        reinterpret_cast<unsigned *>(p)[0] = MAX_POOLED_SIZE + 1;
-        reinterpret_cast<size_t *>(p)[1] = size + 64;
-        return reinterpret_cast<char *>(p) + 64;
-    }
-    else
+
+    if (alignment && (!std::has_single_bit(alignment) ||
+                alignment > std::numeric_limits<unsigned>::max())) [[unlikely]]
         return nullptr;
+
+    if (!size) [[unlikely]]
+        size = 1; // Some libraies expect non-null result of malloc(0).
+
+    if (size <= MAX_POOLED_SIZE && alignment <= LARGE_ALIGNMENT) {
+        size_t default_alignment = 1U << log2floor(size);
+        if (alignment <= default_alignment)
+            return pools_[size_to_idx(size)].alloc_inline();
+        size_t ext_size = std::max(size, alignment);
+        if (ext_size <= MAX_POOLED_SIZE)
+            return pools_[size_to_idx(ext_size)].alloc_inline();
+    }
+
+    static_assert(LARGE_ALIGNMENT >= sizeof(large_obj_header));
+    if (alignment < LARGE_ALIGNMENT)
+        alignment = LARGE_ALIGNMENT;
+
+    size_t space = size + alignment;
+    bool huge = false;
+    char *p = nullptr;
+    if (2 * space >= HUGEPAGESIZE) {
+        // round up to hugepage size
+        size_t sz = (space + HUGEPAGESIZE - 1) & HUGEPAGESTART_MASK;
+        p = reinterpret_cast<char *>(mmap(
+                    nullptr, sz,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB,
+                    -1, 0));
+        if (p != MAP_FAILED) {
+            huge = true;
+            space = sz;
+        }
+    }
+    if (!huge) {
+        space = (space + PAGESIZE - 1) & PAGESTART_MASK; // round up to pagesize
+        p = reinterpret_cast<char *>(mmap(
+                    nullptr, space,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    -1, 0));
+    }
+
+    if (p == MAP_FAILED)
+        return nullptr;
+
+    char *end_p = p + space;
+    void *res_p = p + LARGE_ALIGNMENT;
+    space -= LARGE_ALIGNMENT;
+    if (!std::align(alignment, size, res_p, space)) [[unlikely]]
+        return nullptr;
+
+    char *hdr_p = reinterpret_cast<char *>(page_of_obj(res_p));
+    if (hdr_p == res_p)
+        hdr_p -= PAGESIZE;
+
+    if (!huge && p < hdr_p) {
+        if (munmap(p, hdr_p - p) != 0)
+            global_trash.add_region(p, hdr_p - p);
+        p = hdr_p;
+    }
+
+    large_obj_header *lhdr = reinterpret_cast<large_obj_header *>(hdr_p);
+    lhdr->obj_size = MAX_POOLED_SIZE + 1u;
+    lhdr->page_size = static_cast<unsigned>(huge ? HUGEPAGESIZE : PAGESIZE);
+    lhdr->allocation_start = p;
+    lhdr->allocated_size = static_cast<size_t>(end_p - p);
+
+    return res_p;
 }
 
-void * gp_allocator_local::allocate(size_t size) noexcept
+void * gp_allocator_local::allocate(size_t size, size_t alignment) noexcept
 {
-    return allocate_inline(size);
+    return allocate_inline(size, alignment);
 }
 
-void * gp_allocator_local::allocate_zeroed(size_t size) noexcept
+void *
+gp_allocator_local::allocate_zeroed(size_t size, size_t alignment) noexcept
 {
-    void *p = allocate_inline(size);
-    if (p && size && size <= MAX_POOLED_SIZE)
+    void *p = allocate_inline(size, alignment);
+    header_base *hdr = reinterpret_cast<header_base *>(page_of_obj(p));
+    if (hdr && hdr != p && hdr->obj_size <= MAX_POOLED_SIZE)
         memset(p, 0, size);
     return p;
 }
@@ -624,50 +711,64 @@ void * gp_allocator_local::allocate_zeroed(size_t size) noexcept
 [[gnu::always_inline]]
 inline void gp_allocator_local::free_inline(void *p) noexcept
 {
-    void *page_start = page_of_obj(p);
-    unsigned objsize = *reinterpret_cast<unsigned *>(page_start);
-    if (likely(objsize <= MAX_POOLED_SIZE)) {
-        pools_[size_to_idx(objsize)].free_inline(p);
-        return;
-    }
-    else {
-        size_t size = reinterpret_cast<size_t *>(page_start)[1];
-        if (munmap(page_start, size) != 0)
-            global_trash.add_region(page_start, size);
-        global_trash.clean();
+    if (p) [[likely]] {
+        char *page_start = reinterpret_cast<char *>(page_of_obj(p));
+        if (page_start == p)
+            page_start -= PAGESIZE;
+        header_base *hdr = reinterpret_cast<header_base *>(page_start);
+        unsigned obj_size = hdr->obj_size;
+        if (obj_size <= MAX_POOLED_SIZE) [[likely]]
+            return pools_[size_to_idx(obj_size)].free_inline(p);
+        else {
+            large_obj_header *lhdr = reinterpret_cast<large_obj_header *>(hdr);
+            char *allocation_start = lhdr->allocation_start;
+            size_t size = lhdr->allocated_size;
+            if (munmap(allocation_start, size) != 0)
+                global_trash.add_region(allocation_start, size);
+            global_trash.clean();
+        }
     }
 }
 
 void * gp_allocator_local::resize(void *p, size_t nsize) noexcept
 {
-    if (unlikely(!p))
+    if (!p) [[unlikely]]
         return allocate_inline(nsize);
 
-    void *page_start = page_of_obj(p);
-    unsigned objsize = *reinterpret_cast<unsigned *>(page_start);
+    char *page_start = reinterpret_cast<char *>(page_of_obj(p));
+    if (page_start == p)
+        page_start -= PAGESIZE;
+    header_base *hdr = reinterpret_cast<header_base *>(page_start);
+    unsigned obj_size = hdr->obj_size;
     size_t size;
-    if (objsize <= MAX_POOLED_SIZE) {
-        unsigned old_idx = size_to_idx(objsize);
+    if (obj_size <= MAX_POOLED_SIZE) {
+        unsigned old_idx = size_to_idx(obj_size);
         unsigned new_idx = size_to_idx(static_cast<unsigned>(nsize));
-        if (old_idx == new_idx)
+        if (old_idx == new_idx && nsize <= obj_size)
             return p;
-        size = objsize;
+        size = obj_size;
     }
     else {
-        size = reinterpret_cast<size_t *>(page_start)[1];
-        size_t old_size = (size + PAGESIZE - 1) & PAGESTART_MASK;
-        size_t new_size = (64 + nsize + PAGESIZE - 1) & PAGESTART_MASK;
-        if (new_size <= old_size) {
-            size_t free_size = size - new_size;
+        large_obj_header *lhdr = static_cast<large_obj_header *>(hdr);
+        unsigned page_size = lhdr->page_size;
+        char *alloc_start = lhdr->allocation_start;
+        size_t alloc_size = lhdr->allocated_size;
+        size_t hdr_size = reinterpret_cast<char *>(p) - alloc_start;
+        size = alloc_size - hdr_size;
+
+        // round sizes up to the whole pages
+        size_t pagestart_mask = ~size_t(page_size) + 1;
+        size_t new_size = (hdr_size + nsize + page_size - 1) & pagestart_mask;
+
+        if (new_size <= alloc_size) {
+            size_t free_size = alloc_size - new_size;
             if (free_size) {
-                void *fp = reinterpret_cast<char *>(page_start) + new_size;
-                if (munmap(fp, free_size) != 0)
-                    global_trash.add_region(fp, free_size);
+                char *free_start = alloc_start + new_size;
+                if (munmap(free_start, free_size) != 0)
+                    global_trash.add_region(free_start, free_size);
                 global_trash.clean();
             }
-            if (!new_size)
-                return nullptr;
-            reinterpret_cast<size_t *>(page_start)[1] = nsize + 64;
+            lhdr->allocated_size = new_size;
             return p;
         }
     }
@@ -680,19 +781,58 @@ void * gp_allocator_local::resize(void *p, size_t nsize) noexcept
     return nullptr;
 }
 
+size_t gp_allocator_local::usable_size(void *p) noexcept
+{
+    if (!p) [[unlikely]]
+        return 0;
+
+    char *page_start = reinterpret_cast<char *>(page_of_obj(p));
+    if (page_start == p)
+        page_start -= PAGESIZE;
+    header_base *hdr = reinterpret_cast<header_base *>(page_start);
+    unsigned obj_size = hdr->obj_size;
+    if (obj_size <= MAX_POOLED_SIZE)
+        return obj_size;
+    else {
+        large_obj_header *lhdr = static_cast<large_obj_header *>(hdr);
+        char *alloc_end = lhdr->allocation_start + lhdr->allocated_size;
+        return alloc_end - reinterpret_cast<char *>(p);
+    }
+}
+
 void gp_allocator_local::free(void *p) noexcept { return free_inline(p); }
 
 static thread_local gp_allocator_local default_gp_allocator;
 
 
-void * allocate(size_t size) noexcept
+void * malloc(size_t size) noexcept
 {
     return default_gp_allocator.allocate_inline(size);
 }
 
+void * calloc(size_t num, size_t size) noexcept
+{
+    return default_gp_allocator.allocate_zeroed(size * num);
+}
+
+void * realloc(void *p, size_t size) noexcept
+{
+    return default_gp_allocator.resize(p, size);
+}
+
+void * aligned_alloc(size_t alignment, size_t size) noexcept
+{
+    return default_gp_allocator.allocate(size, alignment);
+}
+
 void free(void *p) noexcept
 {
-    return default_gp_allocator.free_inline(p);
+    default_gp_allocator.free_inline(p);
+}
+
+size_t usable_size(void *p)
+{
+    return default_gp_allocator.usable_size(p);
 }
 
 } // namespace falloc
@@ -710,20 +850,59 @@ FALLOC_IMPEXP void * calloc(size_t num, size_t size) noexcept
     return falloc::default_gp_allocator.allocate_zeroed(size * num);
 }
 
-FALLOC_IMPEXP void free(void *p) noexcept
-{
-    if (p)
-        falloc::default_gp_allocator.free_inline(p);
-}
-
-FALLOC_IMPEXP void * realloc(void *p, size_t size)
+FALLOC_IMPEXP void * realloc(void *p, size_t size) noexcept
 {
     return falloc::default_gp_allocator.resize(p, size);
 }
 
-FALLOC_IMPEXP void * aligned_alloc(size_t alignment, size_t size)
+FALLOC_IMPEXP void * reallocarray(void *p, size_t nmemb, size_t size) noexcept
 {
-    return falloc::default_gp_allocator.allocate(std::max(size, alignment));
+    return falloc::default_gp_allocator.resize(p, nmemb * size);
+}
+
+FALLOC_IMPEXP void * aligned_alloc(size_t alignment, size_t size) noexcept
+{
+    return falloc::default_gp_allocator.allocate(size, alignment);
+}
+
+FALLOC_IMPEXP void * memalign(size_t alignment, size_t size) noexcept
+{
+    return falloc::default_gp_allocator.allocate(size, alignment);
+}
+
+FALLOC_IMPEXP void * valloc(size_t size) noexcept
+{
+    return falloc::default_gp_allocator.allocate(size, falloc::PAGESIZE);
+}
+
+FALLOC_IMPEXP void * pvalloc(size_t size) noexcept
+{
+    return falloc::default_gp_allocator.allocate(
+            (size + falloc::PAGESIZE - 1) & falloc::PAGESTART_MASK,
+            falloc::PAGESIZE);
+}
+
+FALLOC_IMPEXP
+int posix_memalign(void **memptr, size_t alignment, size_t size) noexcept
+{
+    if (void *p = falloc::default_gp_allocator.allocate(size, alignment)) {
+        *memptr = p;
+        return 0;
+    }
+    else if (alignment && !std::has_single_bit(alignment))
+        return EINVAL;
+    else
+        return ENOMEM;
+}
+
+FALLOC_IMPEXP void free(void *p) noexcept
+{
+    falloc::default_gp_allocator.free_inline(p);
+}
+
+FALLOC_IMPEXP size_t malloc_usable_size(void *p)
+{
+    return falloc::default_gp_allocator.usable_size(p);
 }
 
 } // extern "C"

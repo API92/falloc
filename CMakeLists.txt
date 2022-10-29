@@ -1,5 +1,5 @@
 project(falloc)
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.0)
 
 option(FALLOC_STDAPI "Build with malloc, calloc, realloc, aligned_alloc, free." ON)
 
@@ -27,5 +27,5 @@ if(BUILD_SHARED_LIBS)
 endif()
 
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_EXTENSIONS OFF)
-set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 17)
+set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD 20)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
